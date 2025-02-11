@@ -1,1 +1,1 @@
-pub mod singly_linked_tree;
+pub mod singly_linked_list;
