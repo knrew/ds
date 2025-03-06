@@ -1,4 +1,4 @@
-//! 単方向連結リスト(singly-linked list)の実装
+//! Boxを使った単方向連結リスト(singly-linked list)の実装
 
 use std::ops::{Index, IndexMut};
 
@@ -142,6 +142,8 @@ pub fn node_nth_next_mut(mut node: &mut Option<Box<Node>>, n: usize) -> &mut Opt
     }
     node
 }
+
+fn main() {}
 
 #[cfg(test)]
 mod tests {
