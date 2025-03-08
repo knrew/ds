@@ -8,6 +8,7 @@
 - 二分探索木(binary search tree)
 
 ## 実装中
+- AVL木(set)
 
 ## 実装したい
 - 双方向連結リスト(doubly-liked list)
