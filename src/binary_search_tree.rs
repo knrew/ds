@@ -180,8 +180,6 @@ impl Node {
     }
 }
 
-fn main() {}
-
 #[cfg(test)]
 mod tests {
     use super::BinarySearchTree;

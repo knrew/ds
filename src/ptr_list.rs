@@ -73,11 +73,9 @@ impl Default for Node {
     }
 }
 
-fn main() {}
-
 #[cfg(test)]
 mod tests {
-    use crate::SinglyLinkedList;
+    use super::SinglyLinkedList;
 
     #[test]
     fn test_push_back() {

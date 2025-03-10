@@ -143,8 +143,6 @@ pub fn node_nth_next_mut(mut node: &mut Option<Box<Node>>, n: usize) -> &mut Opt
     node
 }
 
-fn main() {}
-
 #[cfg(test)]
 mod tests {
     use super::SinglyLinkedList;
