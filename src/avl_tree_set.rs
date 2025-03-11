@@ -1,6 +1,15 @@
-//! AVLTreeによるsetの実装
+//! # AVLTreeSet
+//! ## 未実装
+//! - get_nth_mut
+//! - iter_mut
+//! - range
 
-use std::{cmp::Ordering, fmt::Debug, ptr::NonNull};
+use std::{
+    cmp::Ordering,
+    fmt::Debug,
+    mem::{swap, take},
+    ptr::NonNull,
+};
 
 #[derive(Clone)]
 pub struct AVLTreeSet {
@@ -131,13 +140,72 @@ impl AVLTreeSet {
                 n -= left_len + 1;
             }
         }
-
         None
     }
 
-    pub fn append(&mut self, other: &mut Self) {
-        let root = Node::merge(self.root.take(), other.root.take());
-        *self = Self { root }
+    /// 降順でn番目の要素を取得する
+    pub fn get_nth_back(&self, mut n: usize) -> Option<&i32> {
+        let mut cur = &self.root;
+        while let Some(x) = cur.map(|x| unsafe { x.as_ref() }) {
+            let right_len = Node::len(&x.right);
+            if n == right_len {
+                return Some(&x.value);
+            } else if n < right_len {
+                cur = &x.right;
+            } else {
+                cur = &x.left;
+                n -= right_len + 1;
+            }
+        }
+        None
+    }
+
+    /// NOTE: 2つのAVL木の要素数をN, Mに対してO(min(N+M)log N)
+    pub fn append(&mut self, other: &mut AVLTreeSet) {
+        fn insert(tree: &mut AVLTreeSet, node: Option<NonNull<Node>>) {
+            if let Some(node) = node {
+                insert(tree, unsafe { node.as_ref() }.left);
+                insert(tree, unsafe { node.as_ref() }.right);
+                tree.insert(unsafe { node.as_ref() }.value);
+            }
+        }
+
+        if self.len() >= other.len() {
+            insert(self, take(other).root);
+        } else {
+            insert(other, take(self).root);
+            swap(self, other);
+        }
+    }
+
+    /// NOTE: AVL木の要素数Nに対してO(Nlog N)
+    /// ↑本当？　もっと効率的な方法があるのでは
+    /// 実装も要改善
+    pub fn split_off(&mut self, value: &i32) -> AVLTreeSet {
+        fn insert(
+            node: &mut Option<NonNull<Node>>,
+            left: &mut AVLTreeSet,
+            right: &mut AVLTreeSet,
+            value: &i32,
+        ) {
+            if let Some(mut node) = node.take() {
+                insert(&mut unsafe { node.as_mut() }.left, left, right, value);
+                insert(&mut unsafe { node.as_mut() }.right, left, right, value);
+                let node_value = unsafe { node.as_ref() }.value;
+                if &node_value < value {
+                    left.insert(node_value);
+                } else {
+                    right.insert(node_value);
+                }
+                unsafe { drop(Box::from_raw(node.as_ptr())) };
+            }
+        }
+
+        let mut left = Self::new();
+        let mut right = Self::new();
+        insert(&mut self.root.take(), &mut left, &mut right, value);
+        *self = left;
+        right
     }
 
     pub fn iter(&self) -> Iter<'_> {
@@ -153,7 +221,6 @@ impl Default for AVLTreeSet {
 
 impl Drop for AVLTreeSet {
     fn drop(&mut self) {
-        // 再帰的にメモリを解放する
         fn free(node: &mut Option<NonNull<Node>>) {
             if let Some(mut node) = node.take() {
                 free(&mut unsafe { node.as_mut() }.left);
@@ -379,74 +446,6 @@ impl Node {
             }
         }
     }
-
-    fn merge_with_root(
-        mut left: Option<NonNull<Node>>,
-        mut root: NonNull<Node>,
-        mut right: Option<NonNull<Node>>,
-    ) -> NonNull<Node> {
-        let d = Node::height(&left) - Node::height(&right);
-
-        if d.abs() <= 1 {
-            unsafe {
-                root.as_mut().left = left;
-                root.as_mut().right = right;
-                root.as_mut().update();
-            }
-            root
-        } else if d > 0 {
-            unsafe {
-                left.unwrap().as_mut().right = Some(Node::merge_with_root(
-                    left.unwrap().as_mut().right,
-                    root,
-                    right,
-                ));
-            }
-            Node::balance(&mut left);
-            left.unwrap()
-        } else {
-            unsafe {
-                right.unwrap().as_mut().left = Some(Node::merge_with_root(
-                    left,
-                    root,
-                    right.unwrap().as_mut().left,
-                ));
-            }
-            Node::balance(&mut right);
-            right.unwrap()
-        }
-    }
-
-    fn merge(
-        mut left: Option<NonNull<Node>>,
-        right: Option<NonNull<Node>>,
-    ) -> Option<NonNull<Node>> {
-        if left.is_none() {
-            right
-        } else if right.is_none() {
-            left
-        } else {
-            let (l, removed) = Node::remove_rightest(left);
-            left = l;
-            Some(Node::merge_with_root(left, removed.unwrap(), right))
-        }
-    }
-
-    fn remove_rightest(
-        mut node: Option<NonNull<Node>>,
-    ) -> (Option<NonNull<Node>>, Option<NonNull<Node>>) {
-        unsafe {
-            if node.unwrap().as_ref().right.is_some() {
-                let (x, removed) = Node::remove_rightest(node.unwrap().as_ref().right);
-                node.unwrap().as_mut().right = x;
-                Node::balance(&mut node);
-                (node, removed)
-            } else {
-                let removed = node;
-                (node.unwrap().as_ref().left, removed)
-            }
-        }
-    }
 }
 
 impl AVLTreeSet {
@@ -527,6 +526,72 @@ mod tests {
         assert!(tree.remove(&82));
         assert!(!tree.remove(&44));
         assert!(tree.iter().copied().eq([27, 31, 37, 70, 73, 94]));
+    }
+
+    #[test]
+    fn test_get_nth() {
+        let tree = AVLTreeSet::from([1, 3, 5, 7, 9]);
+        assert_eq!(tree.get_nth(0), Some(&1));
+        assert_eq!(tree.get_nth(1), Some(&3));
+        assert_eq!(tree.get_nth(2), Some(&5));
+        assert_eq!(tree.get_nth(3), Some(&7));
+        assert_eq!(tree.get_nth(4), Some(&9));
+        assert_eq!(tree.get_nth(5), None);
+    }
+
+    #[test]
+    fn test_get_nth_back() {
+        let tree = AVLTreeSet::from([2, 4, 6, 8, 10]);
+        assert_eq!(tree.get_nth_back(0), Some(&10));
+        assert_eq!(tree.get_nth_back(1), Some(&8));
+        assert_eq!(tree.get_nth_back(2), Some(&6));
+        assert_eq!(tree.get_nth_back(3), Some(&4));
+        assert_eq!(tree.get_nth_back(4), Some(&2));
+        assert_eq!(tree.get_nth_back(5), None);
+    }
+
+    #[test]
+    fn test_append() {
+        let mut tree1 = AVLTreeSet::from([1, 3, 5]);
+        let mut tree2 = AVLTreeSet::from([2, 4, 6]);
+        tree1.append(&mut tree2);
+        assert!(tree1.iter().copied().eq([1, 2, 3, 4, 5, 6]));
+        assert!(tree2.is_empty());
+
+        let mut tree1 = AVLTreeSet::new();
+        let mut tree2 = AVLTreeSet::new();
+        tree1.append(&mut tree2);
+        assert!(tree1.is_empty());
+        assert!(tree2.is_empty());
+        tree1.insert(10);
+        tree1.append(&mut AVLTreeSet::new());
+        assert!(tree1.iter().copied().eq([10]));
+        assert!(tree2.is_empty());
+
+        let mut tree1 = AVLTreeSet::new();
+        let mut tree2 = AVLTreeSet::from([7, 8]);
+        tree1.append(&mut tree2);
+        assert!(tree1.iter().copied().eq([7, 8]));
+        assert!(tree2.is_empty());
+
+        let mut tree1 = AVLTreeSet::from([2, 4, 6]);
+        let mut tree2 = AVLTreeSet::from([3, 4, 5]);
+        tree1.append(&mut tree2);
+        assert!(tree1.iter().copied().eq([2, 3, 4, 5, 6]));
+        assert!(tree2.is_empty());
+    }
+
+    #[test]
+    fn test_split_off() {
+        let mut tree1 = AVLTreeSet::from([1, 2, 3, 4, 5, 6]);
+        let tree2 = tree1.split_off(&4);
+        assert!(tree1.iter().copied().eq([1, 2, 3]));
+        assert!(tree2.iter().copied().eq([4, 5, 6]));
+
+        let mut tree1 = AVLTreeSet::from([2, 4, 6, 8, 10]);
+        let tree2 = tree1.split_off(&5);
+        assert!(tree1.iter().copied().eq([2, 4]));
+        assert!(tree2.iter().copied().eq([6, 8, 10]));
     }
 
     #[test]
