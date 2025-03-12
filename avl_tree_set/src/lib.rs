@@ -1,162 +1,425 @@
-//! # AVLTreeSet
-//! ## 未実装
-//! - get_nth_mut
-//! - iter_mut
-//! - range
-
-pub mod visualizer;
+//! AVL木によるordered setの実装
+//! TODO: 不要なCopy, Defaultを外す
 
 use std::{
+    borrow::Borrow,
     cmp::Ordering,
     fmt::Debug,
-    hash::Hash,
     mem::{swap, take},
     ptr::NonNull,
 };
 
+pub mod visualizer;
+
 #[derive(Clone)]
-pub struct AvlTreeSet {
-    root: Option<NonNull<Node>>,
+struct Node<T> {
+    key: T,
+    len: usize,
+    height: i32,
+    left: Link<T>,
+    right: Link<T>,
 }
 
-impl AvlTreeSet {
+type NodePtr<T> = NonNull<Node<T>>;
+type Link<T> = Option<NodePtr<T>>;
+
+impl<T> Node<T> {
+    fn new(key: T) -> NodePtr<T> {
+        let node = Self {
+            key,
+            len: 1,
+            height: 1,
+            left: None,
+            right: None,
+        };
+        NonNull::from(Box::leak(Box::new(node)))
+    }
+
+    /// 部分木が更新された場合に呼ぶ
+    /// 部分木の長さと高さを再計算する
+    #[inline]
+    fn fetch(&mut self) {
+        self.len = node_len(self.left) + node_len(self.right) + 1;
+        self.height = node_height(self.left).max(node_height(self.right)) + 1;
+    }
+}
+
+#[inline]
+fn free<T>(node: NodePtr<T>) {
+    unsafe { drop(Box::from_raw(node.as_ptr())) };
+}
+
+#[inline]
+fn node_len<T>(node: Link<T>) -> usize {
+    node.map_or(0, |node| unsafe { node.as_ref() }.len)
+}
+
+#[inline]
+fn node_height<T>(node: Link<T>) -> i32 {
+    node.map_or(0, |node| unsafe { node.as_ref() }.height)
+}
+
+/// rootを根とした部分木を右回転させる
+/// (左の子が存在している場合のみ呼び出す)
+fn rotate_right<T>(root: &mut Link<T>) {
+    *root = {
+        unsafe {
+            let mut root = root.unwrap();
+            let mut left = root.as_ref().left.unwrap();
+            root.as_mut().left = left.as_mut().right;
+            root.as_mut().fetch();
+            left.as_mut().right = Some(root);
+            left.as_mut().fetch();
+            Some(left)
+        }
+    };
+}
+
+/// rootを根とした部分木を左回転させる
+/// (右の子が存在する場合のみ呼び出す)
+fn rotate_left<T>(root: &mut Link<T>) {
+    *root = {
+        unsafe {
+            let mut root = root.unwrap();
+            let mut right = root.as_ref().right.unwrap();
+            root.as_mut().right = right.as_mut().left;
+            root.as_mut().fetch();
+            right.as_mut().left = Some(root);
+            right.as_mut().fetch();
+            Some(right)
+        }
+    };
+}
+
+/// rootを根とした部分木を平衡させる
+fn balance<T>(root: &mut Link<T>) {
+    /// 左部分木と右部分木の高さの差
+    /// 左部分木の高さ - 右部分木の高さ
+    #[inline]
+    fn diff_height<T>(node: Link<T>) -> i32 {
+        node.map_or(0, |node| {
+            let node = unsafe { node.as_ref() };
+            node_height(node.left) - node_height(node.right)
+        })
+    }
+
+    if root.is_none() {
+        return;
+    }
+
+    let d = diff_height(*root);
+
+    if d > 1 {
+        // 左部分木が高い場合
+
+        let left = &mut unsafe { root.unwrap().as_mut() }.left;
+        if diff_height(*left) < 0 {
+            rotate_left(left);
+        }
+
+        rotate_right(root);
+    } else if d < -1 {
+        // 右部分木が高い場合
+
+        let right = &mut unsafe { root.unwrap().as_mut() }.right;
+        if diff_height(*right) > 0 {
+            rotate_right(right);
+        }
+
+        rotate_left(root);
+    } else {
+        unsafe { root.unwrap().as_mut() }.fetch();
+    }
+}
+
+#[allow(unused)]
+fn traverse<T>(
+    node: Link<T>,
+    mut preorder_f: impl FnMut(NodePtr<T>),
+    mut inorder_f: impl FnMut(NodePtr<T>),
+    mut post_order_f: impl FnMut(NodePtr<T>),
+) {
+    fn traverse<T>(
+        node: Link<T>,
+        preorder_f: &mut impl FnMut(NodePtr<T>),
+        inorder_f: &mut impl FnMut(NodePtr<T>),
+        post_order_f: &mut impl FnMut(NodePtr<T>),
+    ) {
+        if let Some(node) = node {
+            preorder_f(node);
+            traverse(
+                unsafe { node.as_ref() }.left,
+                preorder_f,
+                inorder_f,
+                post_order_f,
+            );
+            inorder_f(node);
+            traverse(
+                unsafe { node.as_ref() }.right,
+                preorder_f,
+                inorder_f,
+                post_order_f,
+            );
+            post_order_f(node);
+        }
+    }
+
+    traverse(node, &mut preorder_f, &mut inorder_f, &mut post_order_f);
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_preorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, f, |_| {}, |_| {});
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_inorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, |_| {}, f, |_| {});
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_postorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, |_| {}, |_| {}, f);
+}
+
+#[derive(Clone)]
+pub struct AvlTreeSet<T> {
+    root: Link<T>,
+}
+
+impl<T> AvlTreeSet<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn clear(&mut self) {
-        *self = Self::new();
-    }
-
     pub fn len(&self) -> usize {
-        node_len(&self.root)
+        node_len(self.root)
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub fn insert(&mut self, value: i32) -> bool {
-        fn insert(node: &mut Option<NonNull<Node>>, value: i32) -> bool {
-            if let Some(node) = node.map(|mut node| unsafe { node.as_mut() }) {
-                match value.cmp(&node.value) {
+    pub fn insert(&mut self, key: T) -> bool
+    where
+        T: Ord,
+    {
+        fn insert<T: Ord>(root: &mut Link<T>, key: T) -> bool {
+            if let Some(node) = root.map(|mut node| unsafe { node.as_mut() }) {
+                match key.cmp(&node.key) {
                     Ordering::Equal => {
                         return false;
                     }
                     Ordering::Less => {
-                        if !insert(&mut node.left, value) {
+                        if !insert(&mut node.left, key) {
                             return false;
                         }
                     }
                     Ordering::Greater => {
-                        if !insert(&mut node.right, value) {
+                        if !insert(&mut node.right, key) {
                             return false;
                         }
                     }
                 }
+                balance(root);
             } else {
-                *node = Some(Node::new(value));
+                *root = Some(Node::new(key));
             }
-            balance_node(node);
+
             true
         }
-        insert(&mut self.root, value)
+
+        insert(&mut self.root, key)
     }
 
-    pub fn contains(&self, value: &i32) -> bool {
-        let mut p = &self.root;
-        while let Some(node) = p.map(|node| unsafe { node.as_ref() }) {
-            match value.cmp(&node.value) {
-                Ordering::Equal => {
-                    return true;
+    pub fn contains(&self, key: &T) -> bool
+    where
+        T: Ord,
+    {
+        fn contains<T: Ord>(node: Link<T>, key: &T) -> bool {
+            if let Some(node) = node.map(|node| unsafe { node.as_ref() }) {
+                match key.cmp(&node.key) {
+                    Ordering::Equal => true,
+                    Ordering::Less => contains(node.left, key),
+                    Ordering::Greater => contains(node.right, key),
                 }
-                Ordering::Less => {
-                    p = &node.left;
-                }
-                Ordering::Greater => {
-                    p = &node.right;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn remove(&mut self, value: &i32) -> bool {
-        fn remove(node: &mut Option<NonNull<Node>>, value: &i32) -> bool {
-            if let Some(x) = node {
-                let x_ref = unsafe { x.as_mut() };
-                match value.cmp(&x_ref.value) {
-                    Ordering::Equal => {
-                        if x_ref.left.is_none() {
-                            let right = x_ref.right;
-                            unsafe { drop(Box::from_raw(x.as_ptr())) };
-                            *node = right;
-                            return true;
-                        } else if x_ref.right.is_none() {
-                            let left = x_ref.left;
-                            unsafe { drop(Box::from_raw(x.as_ptr())) };
-                            *node = left;
-                            return true;
-                        } else {
-                            let mut right = x_ref.right.unwrap();
-                            while let Some(left) = unsafe { right.as_ref().left } {
-                                right = left;
-                            }
-                            x_ref.value = unsafe { right.as_ref().value };
-                            if remove(&mut x_ref.right, &unsafe { right.as_ref().value }) {
-                                balance_node(node);
-                                return true;
-                            }
-                        }
-                    }
-                    Ordering::Less => {
-                        if remove(&mut x_ref.left, value) {
-                            balance_node(node);
-                            return true;
-                        }
-                    }
-                    Ordering::Greater => {
-                        if remove(&mut x_ref.right, value) {
-                            balance_node(node);
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        }
-
-        remove(&mut self.root, value)
-    }
-
-    /// 昇順でn番目の要素を取得する
-    pub fn get_nth(&self, mut n: usize) -> Option<&i32> {
-        let mut cur = &self.root;
-        while let Some(x) = cur.map(|x| unsafe { x.as_ref() }) {
-            let left_len = node_len(&x.left);
-            if n == left_len {
-                return Some(&x.value);
-            } else if n < left_len {
-                cur = &x.left;
             } else {
-                cur = &x.right;
+                false
+            }
+        }
+        contains(self.root, key)
+    }
+
+    pub fn remove<B>(&mut self, key: &B) -> bool
+    where
+        T: Borrow<B>,
+        B: Ord + ?Sized,
+    {
+        fn remove<T, B>(node: &mut Link<T>, key: &B) -> Link<T>
+        where
+            T: Borrow<B>,
+            B: Ord + ?Sized,
+        {
+            let res = if let Some(node_ptr) = node {
+                let node_mut = unsafe { node_ptr.as_mut() };
+
+                match key.cmp(node_mut.key.borrow()) {
+                    Ordering::Equal => {
+                        if node_mut.left.is_none() {
+                            let right = node_mut.right;
+                            unsafe {
+                                node.unwrap().as_mut().right = None;
+                            }
+                            balance(node);
+                            let res = *node;
+                            *node = right;
+                            res
+                        } else if node_mut.right.is_none() {
+                            let left = node_mut.left;
+                            unsafe {
+                                node.unwrap().as_mut().left = None;
+                            }
+                            balance(node);
+                            let res = *node;
+                            *node = left;
+                            res
+                        } else {
+                            let mut right = &mut node_mut.right;
+                            loop {
+                                unsafe {
+                                    if right.unwrap().as_ref().left.is_none() {
+                                        break;
+                                    }
+                                    right = &mut right.unwrap().as_mut().left;
+                                }
+                            }
+                            let key = unsafe { right.unwrap().as_ref() }.key.borrow();
+                            let mut m = remove(&mut right, key);
+                            balance(&mut m);
+                            let res = *node;
+                            *node = m;
+                            unsafe {
+                                node.unwrap().as_mut().left = res.unwrap().as_ref().left;
+                                node.unwrap().as_mut().right = res.unwrap().as_ref().right;
+                            }
+                            res
+                        }
+                    }
+                    Ordering::Less => remove(&mut node_mut.left, key),
+                    Ordering::Greater => remove(&mut node_mut.right, key),
+                }
+            } else {
+                None
+            };
+
+            balance(node);
+            res
+        }
+
+        remove(&mut self.root, key).map(|node| free(node)).is_some()
+    }
+
+    // pub fn remove<Q>(&mut self, key: &Q) -> bool
+    // where
+    //     T: Borrow<Q> + Copy,
+    //     Q: Ord + ?Sized,
+    // {
+    //     fn remove<T, B>(node: &mut Link<T>, key: &B) -> bool
+    //     where
+    //         T: Borrow<B> + Copy,
+    //         B: Ord + ?Sized,
+    //     {
+    //         if let Some(nonnull) = node {
+    //             let nonnull_ref = unsafe { nonnull.as_mut() };
+    //             match key.cmp(&nonnull_ref.key.borrow()) {
+    //                 Ordering::Equal => {
+    //                     match (nonnull_ref.left.is_some(), nonnull_ref.right.is_some()) {
+    //                         (true, true) => {
+    //                             let mut right = nonnull_ref.right.unwrap();
+    //                             while let Some(left) = unsafe { right.as_ref().left } {
+    //                                 right = left;
+    //                             }
+    //                             nonnull_ref.key = unsafe { right.as_ref().key };
+    //                             if remove(
+    //                                 &mut nonnull_ref.right,
+    //                                 &unsafe { right.as_ref().key }.borrow(),
+    //                             ) {
+    //                                 balance(node);
+    //                                 return true;
+    //                             }
+    //                         }
+    //                         (true, false) => {
+    //                             let left = nonnull_ref.left;
+    //                             unsafe { drop(Box::from_raw(nonnull.as_ptr())) };
+    //                             *node = left;
+    //                             return true;
+    //                         }
+    //                         _ => {
+    //                             let right = nonnull_ref.right;
+    //                             unsafe { drop(Box::from_raw(nonnull.as_ptr())) };
+    //                             *node = right;
+    //                             return true;
+    //                         }
+    //                     }
+
+    //                     false
+    //                 }
+    //                 Ordering::Less => {
+    //                     if remove(&mut nonnull_ref.left, key) {
+    //                         balance(node);
+    //                         true
+    //                     } else {
+    //                         false
+    //                     }
+    //                 }
+    //                 Ordering::Greater => {
+    //                     if remove(&mut nonnull_ref.right, key) {
+    //                         balance(node);
+    //                         true
+    //                     } else {
+    //                         false
+    //                     }
+    //                 }
+    //             }
+    //         } else {
+    //             false
+    //         }
+    //     }
+
+    //     remove(&mut self.root, key)
+    // }
+
+    /// 昇順n番目の要素
+    pub fn get_nth(&self, mut n: usize) -> Option<&T> {
+        let mut cur = &self.root;
+        while let Some(node) = cur.map(|node| unsafe { node.as_ref() }) {
+            let left_len = node_len(node.left);
+            if n == left_len {
+                return Some(&node.key);
+            } else if n < left_len {
+                cur = &node.left;
+            } else {
+                cur = &node.right;
                 n -= left_len + 1;
             }
         }
         None
     }
 
-    /// 降順でn番目の要素を取得する
-    pub fn get_nth_back(&self, mut n: usize) -> Option<&i32> {
+    /// 降順n番目の要素
+    pub fn get_nth_back(&self, mut n: usize) -> Option<&T> {
         let mut cur = &self.root;
-        while let Some(x) = cur.map(|x| unsafe { x.as_ref() }) {
-            let right_len = node_len(&x.right);
+        while let Some(node) = cur.map(|node| unsafe { node.as_ref() }) {
+            let right_len = node_len(node.right);
             if n == right_len {
-                return Some(&x.value);
+                return Some(&node.key);
             } else if n < right_len {
-                cur = &x.right;
+                cur = &node.right;
             } else {
-                cur = &x.left;
+                cur = &node.left;
                 n -= right_len + 1;
             }
         }
@@ -164,13 +427,15 @@ impl AvlTreeSet {
     }
 
     /// NOTE: 2つのAVL木の要素数をN, Mに対してO(min(N+M)log N)
-    pub fn append(&mut self, other: &mut AvlTreeSet) {
-        fn insert(tree: &mut AvlTreeSet, node: Option<NonNull<Node>>) {
-            if let Some(node) = node {
-                insert(tree, unsafe { node.as_ref() }.left);
-                insert(tree, unsafe { node.as_ref() }.right);
-                tree.insert(unsafe { node.as_ref() }.value);
-            }
+    pub fn append(&mut self, other: &mut Self)
+    where
+        T: Ord + Default,
+    {
+        fn insert<T: Ord + Default>(tree: &mut AvlTreeSet<T>, node: Link<T>) {
+            traverse_preorder(node, |mut node| {
+                // tree.insert(unsafe { node.as_ref() }.key);
+                tree.insert(take(&mut unsafe { node.as_mut() }.key));
+            });
         }
 
         if self.len() >= other.len() {
@@ -184,145 +449,103 @@ impl AvlTreeSet {
     /// NOTE: AVL木の要素数Nに対してO(Nlog N)
     /// ↑本当？　もっと効率的な方法があるのでは
     /// 実装も要改善
-    pub fn split_off(&mut self, value: &i32) -> AvlTreeSet {
-        fn insert(
-            node: &mut Option<NonNull<Node>>,
-            left: &mut AvlTreeSet,
-            right: &mut AvlTreeSet,
-            value: &i32,
+    pub fn split_off(&mut self, value: &T) -> Self
+    where
+        T: Ord + Default,
+    {
+        fn insert_and_drop<T: Ord + Default>(
+            node: Link<T>,
+            left: &mut AvlTreeSet<T>,
+            right: &mut AvlTreeSet<T>,
+            value: &T,
         ) {
-            if let Some(mut node) = node.take() {
-                insert(&mut unsafe { node.as_mut() }.left, left, right, value);
-                insert(&mut unsafe { node.as_mut() }.right, left, right, value);
-                let node_value = unsafe { node.as_ref() }.value;
+            traverse_postorder(node, |mut node| {
+                // keyだけをこうしんするな
+                let node_value = take(&mut unsafe { node.as_mut() }.key);
                 if &node_value < value {
                     left.insert(node_value);
                 } else {
                     right.insert(node_value);
                 }
-                unsafe { drop(Box::from_raw(node.as_ptr())) };
-            }
+                free(node)
+            });
         }
 
         let mut left = Self::new();
         let mut right = Self::new();
-        insert(&mut self.root.take(), &mut left, &mut right, value);
+        insert_and_drop(self.root.take(), &mut left, &mut right, value);
         *self = left;
         right
     }
 
-    pub fn iter(&self) -> Iter<'_> {
+    pub fn iter(&self) -> Iter<'_, T> {
         Iter::new(&self.root)
     }
 }
 
-impl Default for AvlTreeSet {
-    fn default() -> Self {
-        AvlTreeSet { root: None }
-    }
-}
-
-impl Drop for AvlTreeSet {
+impl<T> Drop for AvlTreeSet<T> {
     fn drop(&mut self) {
-        fn free(node: &mut Option<NonNull<Node>>) {
-            if let Some(mut node) = node.take() {
-                free(&mut unsafe { node.as_mut() }.left);
-                free(&mut unsafe { node.as_mut() }.right);
-                unsafe { drop(Box::from_raw(node.as_ptr())) };
-            }
-        }
-        free(&mut self.root)
+        traverse_postorder(self.root, |node| free(node));
     }
 }
 
-impl PartialEq for AvlTreeSet {
-    fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other)
+impl<T> Default for AvlTreeSet<T> {
+    fn default() -> Self {
+        Self { root: None }
     }
 }
 
-impl Eq for AvlTreeSet {}
-
-impl PartialOrd for AvlTreeSet {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.iter().partial_cmp(other)
+impl<T: Ord> From<Vec<T>> for AvlTreeSet<T> {
+    fn from(v: Vec<T>) -> Self {
+        let mut tree = AvlTreeSet::new();
+        v.into_iter().for_each(|key| {
+            tree.insert(key);
+        });
+        tree
     }
 }
 
-impl Ord for AvlTreeSet {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.iter().cmp(other)
-    }
-}
-
-impl Hash for AvlTreeSet {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.iter().for_each(|item| item.hash(state));
-    }
-}
-
-impl<'a> IntoIterator for &'a AvlTreeSet {
-    type IntoIter = Iter<'a>;
-    type Item = &'a i32;
+impl<'a, T> IntoIterator for &'a AvlTreeSet<T> {
+    type IntoIter = Iter<'a, T>;
+    type Item = &'a T;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-impl IntoIterator for AvlTreeSet {
-    type IntoIter = IntoIter;
-    type Item = i32;
+impl<T: Default> IntoIterator for AvlTreeSet<T> {
+    type IntoIter = IntoIter<T>;
+    type Item = T;
 
-    fn into_iter(self) -> Self::IntoIter {
-        fn collect(node: Option<NonNull<Node>>, v: &mut Vec<i32>) {
-            if let Some(node) = node {
-                collect(unsafe { node.as_ref() }.left, v);
-                v.push(unsafe { node.as_ref() }.value);
-                collect(unsafe { node.as_ref() }.right, v);
-            }
-        }
-        let mut res = vec![];
-        collect(self.root, &mut res);
-        IntoIter {
-            iter: res.into_iter(),
-        }
+    fn into_iter(mut self) -> Self::IntoIter {
+        IntoIter::new(self.root.take())
     }
 }
 
-impl From<Vec<i32>> for AvlTreeSet {
-    fn from(v: Vec<i32>) -> Self {
-        let mut res = Self::new();
-        v.into_iter().for_each(|e| {
-            res.insert(e);
+impl<T: Ord, const N: usize> From<[T; N]> for AvlTreeSet<T> {
+    fn from(v: [T; N]) -> Self {
+        let mut tree = AvlTreeSet::new();
+        v.into_iter().for_each(|key| {
+            tree.insert(key);
         });
-        res
+        tree
     }
 }
 
-impl<const N: usize> From<[i32; N]> for AvlTreeSet {
-    fn from(v: [i32; N]) -> Self {
-        let mut res = Self::new();
-        v.into_iter().for_each(|e| {
-            res.insert(e);
-        });
-        res
-    }
-}
-
-impl Debug for AvlTreeSet {
+impl<T: Debug> Debug for AvlTreeSet<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
 
-pub struct Iter<'a> {
-    stack_left: Vec<&'a NonNull<Node>>,
-    stack_right: Vec<&'a NonNull<Node>>,
+pub struct Iter<'a, T> {
+    stack_left: Vec<&'a NodePtr<T>>,
+    stack_right: Vec<&'a NodePtr<T>>,
 }
 
-impl<'a> Iter<'a> {
-    fn new(root: &'a Option<NonNull<Node>>) -> Self {
+impl<'a, T> Iter<'a, T> {
+    fn new(root: &'a Link<T>) -> Self {
         let mut iter = Self {
             stack_left: vec![],
             stack_right: vec![],
@@ -332,14 +555,14 @@ impl<'a> Iter<'a> {
         iter
     }
 
-    fn push_left(&mut self, mut node: &'a Option<NonNull<Node>>) {
+    fn push_left(&mut self, mut node: &'a Link<T>) {
         while let Some(n) = node {
             self.stack_left.push(n);
             node = &unsafe { n.as_ref() }.left;
         }
     }
 
-    fn push_right(&mut self, mut node: &'a Option<NonNull<Node>>) {
+    fn push_right(&mut self, mut node: &'a Link<T>) {
         while let Some(n) = node {
             self.stack_right.push(n);
             node = &unsafe { n.as_ref() }.right;
@@ -347,134 +570,84 @@ impl<'a> Iter<'a> {
     }
 }
 
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a i32;
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         let node = unsafe { self.stack_left.pop()?.as_ref() };
         self.push_left(&node.right);
-        Some(&node.value)
+        Some(&node.key)
     }
 }
 
-impl<'a> DoubleEndedIterator for Iter<'a> {
+impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let node = unsafe { self.stack_right.pop()?.as_ref() };
         self.push_right(&node.left);
-        Some(&node.value)
+        Some(&node.key)
     }
 }
 
-pub struct IntoIter {
-    iter: std::vec::IntoIter<i32>,
+// TODO: ???
+pub struct IntoIter<T> {
+    iter: std::vec::IntoIter<NodePtr<T>>,
 }
 
-impl Iterator for IntoIter {
-    type Item = i32;
+impl<T> IntoIter<T> {
+    fn new(root: Link<T>) -> Self {
+        let mut stack = vec![];
+        traverse_inorder(root, |node| {
+            stack.push(node);
+        });
+        IntoIter {
+            iter: stack.into_iter(),
+        }
+    }
+}
+
+impl<T: Default> Iterator for IntoIter<T> {
+    type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
+        let mut node = self.iter.next()?;
+        // let res = unsafe { node.as_ref() }.key.take();
+        let res = take(&mut unsafe { node.as_mut() }.key);
+        free(node);
+        Some(res)
     }
 }
 
-impl DoubleEndedIterator for IntoIter {
+impl<T: Default> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.iter.next_back()
+        let mut node = self.iter.next_back()?;
+        // let res = unsafe { node.as_ref() }.key.take();
+        let res = take(&mut unsafe { node.as_mut() }.key);
+        free(node);
+        Some(res)
     }
 }
 
-struct Node {
-    value: i32,
-    len: usize,
-    height: i32,
-    left: Option<NonNull<Node>>,
-    right: Option<NonNull<Node>>,
-}
-
-impl Node {
-    fn new(value: i32) -> NonNull<Node> {
-        let node = Node {
-            value,
-            len: 1,
-            height: 1,
-            left: None,
-            right: None,
-        };
-        NonNull::from(Box::leak(Box::new(node)))
-    }
-
-    fn update(&mut self) {
-        self.len = node_len(&self.left) + node_len(&self.right) + 1;
-        self.height = node_height(&self.left).max(node_height(&self.right)) + 1;
-    }
-}
-
-fn node_len(node: &Option<NonNull<Node>>) -> usize {
-    node.map_or(0, |node| unsafe { node.as_ref() }.len)
-}
-
-fn node_height(node: &Option<NonNull<Node>>) -> i32 {
-    node.map_or(0, |node| unsafe { node.as_ref() }.height)
-}
-
-/// nodeを根とする部分木を平衡する
-fn balance_node(node: &mut Option<NonNull<Node>>) {
-    /// 左部分木と右部分木の高さの差
-    /// 左部分木の高さ - 右部分木の高さ
-    #[inline]
-    fn diff_height(node: &NonNull<Node>) -> i32 {
-        let node = unsafe { node.as_ref() };
-        node_height(&node.left) - node_height(&node.right)
-    }
-
-    /// 木を右回転させる
-    fn rotate_right(root: &mut Option<NonNull<Node>>) {
-        if let Some(x) = root {
-            let mut y = unsafe { x.as_mut() }.left.unwrap();
-            unsafe { x.as_mut() }.left = unsafe { y.as_mut() }.right;
-            unsafe { x.as_mut() }.update();
-            unsafe { y.as_mut() }.right = Some(*x);
-            unsafe { y.as_mut() }.update();
-            *root = Some(y);
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        for node in take(&mut self.iter) {
+            free(node)
         }
     }
+}
 
-    /// 木を左回転させる
-    fn rotate_left(root: &mut Option<NonNull<Node>>) {
-        if let Some(x) = root {
-            let mut y = unsafe { x.as_mut() }.right.unwrap();
-            unsafe { x.as_mut() }.right = unsafe { y.as_mut() }.left;
-            unsafe { x.as_mut() }.update();
-            unsafe { y.as_mut() }.left = Some(*x);
-            unsafe { y.as_mut() }.update();
-            *root = Some(y);
-        }
-    }
+pub fn poyo() {
+    let mut st = AvlTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    println!("{:?}", st);
+    println!("{}", st.len());
+    st.visualize();
+    st.remove(&4);
+    println!("{:?}", st);
+    println!("{}", st.len());
+    st.visualize();
 
-    if let Some(x) = node {
-        let d = diff_height(&x);
-        let x = unsafe { x.as_mut() };
-
-        if d > 1 {
-            // 左部分木が高い場合
-
-            if diff_height(&x.left.unwrap()) < 0 {
-                rotate_left(&mut x.left);
-            }
-
-            rotate_right(node);
-        } else if d < -1 {
-            // 右部分木が高い場合
-
-            if diff_height(&x.right.unwrap()) > 0 {
-                rotate_right(&mut x.right);
-            }
-
-            rotate_left(node);
-        } else {
-            x.update();
-        }
-    }
+    traverse_inorder(st.root, |node| unsafe {
+        println!("{:?}: {:?}", node.as_ref().key, node.as_ref().len);
+    });
 }
 
 #[cfg(test)]
@@ -581,6 +754,21 @@ mod tests {
         let tree2 = tree1.split_off(&5);
         assert!(tree1.iter().copied().eq([2, 4]));
         assert!(tree2.iter().copied().eq([6, 8, 10]));
+
+        let mut tree1 = AvlTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let tree2 = tree1.split_off(&5);
+        assert!(tree1.iter().copied().eq([1, 2, 3, 4]));
+        assert!(tree2.iter().copied().eq([5, 6, 7, 8, 9]));
+
+        let mut tree = AvlTreeSet::from([10, 20, 30, 40, 50]);
+        let tree2 = tree.split_off(&25);
+        assert!(tree.iter().copied().eq([10, 20]));
+        assert!(tree2.iter().copied().eq([30, 40, 50]));
+
+        let mut tree1 = AvlTreeSet::new();
+        let tree2 = tree1.split_off(&10);
+        assert!(tree1.is_empty());
+        assert!(tree2.is_empty());
     }
 
     #[test]
@@ -614,8 +802,9 @@ mod tests {
                         assert_eq!(b.remove(&x), avl.remove(&x));
                     }
                     3 => {
-                        let k = rng.random_range(0..1000);
+                        let k = rng.random_range(0..100);
                         assert_eq!(b.iter().nth(k), avl.get_nth(k));
+                        assert_eq!(b.iter().nth_back(k), avl.get_nth_back(k));
                     }
                     _ => {}
                 }
