@@ -253,15 +253,32 @@ impl<T> AvlTreeSet<T> {
         contains(self.root, key)
     }
 
-    pub fn remove<B>(&mut self, key: &B) -> bool
+    pub fn remove<Q>(&mut self, key: &Q) -> bool
     where
-        T: Borrow<B>,
-        B: Ord + ?Sized,
+        T: Borrow<Q>,
+        Q: Ord,
     {
-        fn remove<T, B>(node: &mut Link<T>, key: &B) -> Link<T>
+        fn remove_min<T>(node: &mut Link<T>) -> Link<T> {
+            unsafe {
+                let left = &mut node.unwrap().as_mut().left;
+                let left_left = &mut left.unwrap().as_mut().left;
+                let res = if left_left.is_none() {
+                    let res = *left;
+                    node.unwrap().as_mut().left = left.unwrap().as_ref().right;
+                    balance(node);
+                    res
+                } else {
+                    remove_min(left)
+                };
+                balance(node);
+                res
+            }
+        }
+
+        fn remove<T, Q>(node: &mut Link<T>, key: &Q) -> Link<T>
         where
-            T: Borrow<B>,
-            B: Ord + ?Sized,
+            T: Borrow<Q>,
+            Q: Ord,
         {
             let res = if let Some(node_ptr) = node {
                 let node_mut = unsafe { node_ptr.as_mut() };
@@ -269,43 +286,33 @@ impl<T> AvlTreeSet<T> {
                 match key.cmp(node_mut.key.borrow()) {
                     Ordering::Equal => {
                         if node_mut.left.is_none() {
-                            let right = node_mut.right;
-                            unsafe {
-                                node.unwrap().as_mut().right = None;
-                            }
+                            let mut right = node_mut.right;
                             balance(node);
-                            let res = *node;
-                            *node = right;
-                            res
+                            swap(node, &mut right);
+                            right
                         } else if node_mut.right.is_none() {
-                            let left = node_mut.left;
-                            unsafe {
-                                node.unwrap().as_mut().left = None;
-                            }
+                            let mut left = node_mut.left;
                             balance(node);
-                            let res = *node;
-                            *node = left;
-                            res
+                            swap(node, &mut left);
+                            left
                         } else {
-                            let mut right = &mut node_mut.right;
-                            loop {
-                                unsafe {
-                                    if right.unwrap().as_ref().left.is_none() {
-                                        break;
-                                    }
-                                    right = &mut right.unwrap().as_mut().left;
-                                }
-                            }
-                            let key = unsafe { right.unwrap().as_ref() }.key.borrow();
-                            let mut m = remove(&mut right, key);
-                            balance(&mut m);
-                            let res = *node;
-                            *node = m;
                             unsafe {
-                                node.unwrap().as_mut().left = res.unwrap().as_ref().left;
-                                node.unwrap().as_mut().right = res.unwrap().as_ref().right;
+                                let right = &mut node_mut.right;
+                                let right_left = &mut right.unwrap().as_mut().left;
+
+                                let mut removed = if right_left.is_none() {
+                                    right.unwrap().as_mut().left = node.unwrap().as_ref().left;
+                                    *right
+                                } else {
+                                    let removed = remove_min(right);
+                                    removed.unwrap().as_mut().left = node.unwrap().as_ref().left;
+                                    removed.unwrap().as_mut().right = node.unwrap().as_ref().right;
+                                    removed
+                                };
+
+                                swap(node, &mut removed);
+                                removed
                             }
-                            res
                         }
                     }
                     Ordering::Less => remove(&mut node_mut.left, key),
@@ -321,76 +328,6 @@ impl<T> AvlTreeSet<T> {
 
         remove(&mut self.root, key).map(|node| free(node)).is_some()
     }
-
-    // pub fn remove<Q>(&mut self, key: &Q) -> bool
-    // where
-    //     T: Borrow<Q> + Copy,
-    //     Q: Ord + ?Sized,
-    // {
-    //     fn remove<T, B>(node: &mut Link<T>, key: &B) -> bool
-    //     where
-    //         T: Borrow<B> + Copy,
-    //         B: Ord + ?Sized,
-    //     {
-    //         if let Some(nonnull) = node {
-    //             let nonnull_ref = unsafe { nonnull.as_mut() };
-    //             match key.cmp(&nonnull_ref.key.borrow()) {
-    //                 Ordering::Equal => {
-    //                     match (nonnull_ref.left.is_some(), nonnull_ref.right.is_some()) {
-    //                         (true, true) => {
-    //                             let mut right = nonnull_ref.right.unwrap();
-    //                             while let Some(left) = unsafe { right.as_ref().left } {
-    //                                 right = left;
-    //                             }
-    //                             nonnull_ref.key = unsafe { right.as_ref().key };
-    //                             if remove(
-    //                                 &mut nonnull_ref.right,
-    //                                 &unsafe { right.as_ref().key }.borrow(),
-    //                             ) {
-    //                                 balance(node);
-    //                                 return true;
-    //                             }
-    //                         }
-    //                         (true, false) => {
-    //                             let left = nonnull_ref.left;
-    //                             unsafe { drop(Box::from_raw(nonnull.as_ptr())) };
-    //                             *node = left;
-    //                             return true;
-    //                         }
-    //                         _ => {
-    //                             let right = nonnull_ref.right;
-    //                             unsafe { drop(Box::from_raw(nonnull.as_ptr())) };
-    //                             *node = right;
-    //                             return true;
-    //                         }
-    //                     }
-
-    //                     false
-    //                 }
-    //                 Ordering::Less => {
-    //                     if remove(&mut nonnull_ref.left, key) {
-    //                         balance(node);
-    //                         true
-    //                     } else {
-    //                         false
-    //                     }
-    //                 }
-    //                 Ordering::Greater => {
-    //                     if remove(&mut nonnull_ref.right, key) {
-    //                         balance(node);
-    //                         true
-    //                     } else {
-    //                         false
-    //                     }
-    //                 }
-    //             }
-    //         } else {
-    //             false
-    //         }
-    //     }
-
-    //     remove(&mut self.root, key)
-    // }
 
     /// 昇順n番目の要素
     pub fn get_nth(&self, mut n: usize) -> Option<&T> {
@@ -635,17 +572,60 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
-pub fn poyo() {
-    let mut st = AvlTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    println!("{:?}", st);
-    println!("{}", st.len());
-    st.visualize();
-    st.remove(&4);
-    println!("{:?}", st);
-    println!("{}", st.len());
-    st.visualize();
+pub fn test() {
+    use std::collections::BTreeSet;
 
-    traverse_inorder(st.root, |node| unsafe {
+    let q = [
+        (1, 14),
+        (0, 68),
+        (1, 94),
+        (0, 16),
+        (0, 87),
+        (0, 45),
+        (1, 70),
+        (1, 1),
+        (0, 29),
+        (0, 19),
+        (0, 52),
+        (1, 29),
+    ];
+
+    let i = 11;
+
+    let mut avl = AvlTreeSet::new();
+    let mut b = BTreeSet::new();
+
+    for i in 0..i {
+        let (t, x) = q[i];
+        if t == 0 {
+            avl.insert(x);
+            b.insert(x);
+        } else {
+            avl.remove(&x);
+            b.remove(&x);
+        }
+    }
+
+    println!("{:?}", q);
+    println!("b: {:?} | {}", b, b.len());
+    println!("avl: {:?} | {}", avl, avl.len());
+    avl.visualize();
+
+    let (t, x) = q[i];
+    if t == 0 {
+        avl.insert(x);
+        b.insert(x);
+    } else {
+        avl.remove(&x);
+        b.remove(&x);
+    }
+
+    println!("{}", avl.iter().eq(b.iter()));
+    println!("b: {:?} | {}", b, b.len());
+    println!("avl: {:?} | {}", avl, avl.len());
+    avl.visualize();
+
+    traverse_inorder(avl.root, |node| unsafe {
         println!("{:?}: {:?}", node.as_ref().key, node.as_ref().len);
     });
 }
