@@ -208,20 +208,18 @@ fn split<T>(node: Link<T>, index: usize) -> (Link<T>, Link<T>) {
     }
 }
 
+/// index番目のノードを取得する
 fn get<T>(node: Link<T>, index: usize) -> Link<T> {
-    if let Some(raw_node) = node.map(|mut node| unsafe { node.as_mut() }) {
-        let left = raw_node.left;
-        let right = raw_node.right;
-        let left_len = len(left);
-        if index < left_len {
-            get(left, index)
-        } else if index > left_len {
-            get(right, index - left_len - 1)
-        } else {
-            node
-        }
+    let node_mut = unsafe { node?.as_mut() };
+    let left = node_mut.left;
+    let right = node_mut.right;
+    let left_len = len(left);
+    if index < left_len {
+        get(left, index)
+    } else if index > left_len {
+        get(right, index - left_len - 1)
     } else {
-        None
+        node
     }
 }
 
@@ -340,15 +338,24 @@ impl<T> AvlTreeVec<T> {
     }
 
     pub fn remove(&mut self, index: usize) -> Option<T> {
-        if index < self.len() {
+        (index < self.len()).then(|| {
             let (left, right) = split(self.root.take(), index);
             let (removed, right) = split(right, 1);
             self.root = merge(left, right);
-            let boxed = unsafe { Box::from_raw(removed?.as_ptr()) };
-            Some(boxed.value)
-        } else {
-            None
-        }
+            let boxed = unsafe { Box::from_raw(removed.unwrap().as_ptr()) };
+            boxed.value
+        })
+    }
+
+    pub fn append(&mut self, other: &mut Self) {
+        self.root = merge(self.root.take(), other.root.take())
+    }
+
+    pub fn split_off(&mut self, index: usize) -> Self {
+        assert!(index <= self.len());
+        let (left, right) = split(self.root.take(), index);
+        self.root = left;
+        Self { root: right }
     }
 
     // TODO: 仮
