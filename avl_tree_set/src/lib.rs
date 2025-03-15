@@ -4,6 +4,7 @@ use std::{
     borrow::Borrow,
     cmp::Ordering,
     fmt::Debug,
+    hash::Hash,
     mem::{swap, take},
     ptr::NonNull,
 };
@@ -223,6 +224,10 @@ impl<T> AvlTreeSet<T> {
         Self::default()
     }
 
+    pub fn clear(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn len(&self) -> usize {
         node_len(self.root)
     }
@@ -420,13 +425,29 @@ impl<T> Default for AvlTreeSet<T> {
     }
 }
 
-impl<T: Ord> From<Vec<T>> for AvlTreeSet<T> {
-    fn from(v: Vec<T>) -> Self {
-        let mut tree = AvlTreeSet::new();
-        v.into_iter().for_each(|key| {
-            tree.insert(key);
-        });
-        tree
+impl<T: PartialEq> PartialEq for AvlTreeSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl<T: Eq> Eq for AvlTreeSet<T> {}
+
+impl<T: PartialOrd> PartialOrd for AvlTreeSet<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<T: Ord> Ord for AvlTreeSet<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<T: Hash> Hash for AvlTreeSet<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.iter().for_each(|item| item.hash(state));
     }
 }
 
@@ -448,13 +469,37 @@ impl<T> IntoIterator for AvlTreeSet<T> {
     }
 }
 
+impl<T: Ord> Extend<T> for AvlTreeSet<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        iter.into_iter().for_each(|x| {
+            self.insert(x);
+        });
+    }
+}
+
+impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for AvlTreeSet<T> {
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        self.extend(iter.into_iter().cloned());
+    }
+}
+
+impl<T: Ord> FromIterator<T> for AvlTreeSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut res = Self::new();
+        res.extend(iter);
+        res
+    }
+}
+
+impl<T: Ord> From<Vec<T>> for AvlTreeSet<T> {
+    fn from(v: Vec<T>) -> Self {
+        Self::from_iter(v)
+    }
+}
+
 impl<T: Ord, const N: usize> From<[T; N]> for AvlTreeSet<T> {
     fn from(v: [T; N]) -> Self {
-        let mut tree = AvlTreeSet::new();
-        v.into_iter().for_each(|key| {
-            tree.insert(key);
-        });
-        tree
+        Self::from_iter(v)
     }
 }
 
@@ -520,7 +565,7 @@ pub struct IntoIter<T> {
 
 impl<T> IntoIter<T> {
     fn new(root: Link<T>) -> Self {
-        let mut stack = vec![];
+        let mut stack = Vec::with_capacity(node_len(root));
         traverse_inorder(root, |node| {
             stack.push(node);
         });
