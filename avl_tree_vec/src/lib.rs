@@ -1,10 +1,12 @@
 use std::{
+    cmp::Ordering,
     fmt::Debug,
+    hash::Hash,
+    marker::PhantomData,
+    mem::take,
     ops::{Index, IndexMut},
     ptr::NonNull,
 };
-
-pub mod visualizer;
 
 #[derive(Clone)]
 struct Node<T> {
@@ -30,8 +32,6 @@ impl<T> Node<T> {
         NonNull::from(Box::leak(Box::new(node)))
     }
 
-    /// 部分木が更新された場合に呼ぶ
-    /// 部分木の長さと高さを再計算する
     #[inline]
     fn fetch(&mut self) {
         self.len = len(self.left) + len(self.right) + 1;
@@ -73,11 +73,15 @@ fn balance<T>(mut root: Link<T>) -> Link<T> {
         *root = {
             unsafe {
                 let mut root = root.unwrap();
-                let mut left = root.as_ref().left.unwrap();
-                root.as_mut().left = left.as_mut().right;
-                root.as_mut().fetch();
-                left.as_mut().right = Some(root);
-                left.as_mut().fetch();
+                let raw_root = root.as_mut();
+
+                let mut left = raw_root.left.unwrap();
+                let raw_left = left.as_mut();
+
+                raw_root.left = raw_left.right;
+                raw_root.fetch();
+                raw_left.right = Some(root);
+                raw_left.fetch();
                 Some(left)
             }
         };
@@ -134,22 +138,17 @@ fn merge_with_root<T>(left: Link<T>, root: Link<T>, right: Link<T>) -> Link<T> {
     let d = height(left) - height(right);
 
     if d > 1 {
-        unsafe {
-            left.unwrap().as_mut().right =
-                merge_with_root(left.unwrap().as_ref().right, root, right);
-        }
+        let raw_left = unsafe { left.unwrap().as_mut() };
+        raw_left.right = merge_with_root(raw_left.right, root, right);
         balance(left)
     } else if d < -1 {
-        unsafe {
-            right.unwrap().as_mut().left =
-                merge_with_root(left, root, right.unwrap().as_ref().left);
-        }
+        let raw_right = unsafe { right.unwrap().as_mut() };
+        raw_right.left = merge_with_root(left, root, raw_right.left);
         balance(right)
     } else {
-        unsafe {
-            root.unwrap().as_mut().left = left;
-            root.unwrap().as_mut().right = right;
-        }
+        let raw_root = unsafe { root.unwrap().as_mut() };
+        raw_root.left = left;
+        raw_root.right = right;
         balance(root)
     }
 }
@@ -158,15 +157,15 @@ fn merge_with_root<T>(left: Link<T>, root: Link<T>, right: Link<T>) -> Link<T> {
 fn merge<T>(left: Link<T>, right: Link<T>) -> Link<T> {
     /// nodeの部分木のうち最も右のノードを削除して新たなrootと削除されたノードを返す
     fn remove_max<T>(mut node: Link<T>) -> (Link<T>, Link<T>) {
-        let node_mut = unsafe { node.unwrap().as_mut() };
-        if node_mut.right.is_some() {
-            let (tmp, removed) = remove_max(node_mut.right);
-            node_mut.right = tmp;
+        let raw_node = unsafe { node.unwrap().as_mut() };
+        if raw_node.right.is_some() {
+            let (tmp, removed) = remove_max(raw_node.right);
+            raw_node.right = tmp;
             node = balance(node);
             (node, removed)
         } else {
             let removed = node;
-            node = node_mut.left;
+            node = raw_node.left;
             (node, removed)
         }
     }
@@ -182,44 +181,64 @@ fn merge<T>(left: Link<T>, right: Link<T>) -> Link<T> {
 }
 
 /// [0, index)の部分木と[index, n)の部分木に分割する
-fn split<T>(node: Link<T>, index: usize) -> (Link<T>, Link<T>) {
-    if node.is_none() {
+fn split<T>(root: Link<T>, index: usize) -> (Link<T>, Link<T>) {
+    if root.is_none() {
         return (None, None);
     }
 
     let (left, right) = {
-        let node_mut = unsafe { node.unwrap().as_mut() };
-        let left = node_mut.left;
-        let right = node_mut.right;
-        node_mut.left = None;
-        node_mut.right = None;
+        let raw_root = unsafe { root.unwrap().as_mut() };
+        let left = raw_root.left;
+        let right = raw_root.right;
+        raw_root.left = None;
+        raw_root.right = None;
         (left, right)
     };
 
     let left_len = len(left);
     if index < left_len {
-        let (x, y) = split(left, index);
-        (x, merge_with_root(y, node, right))
+        let tmp = split(left, index);
+        (tmp.0, merge_with_root(tmp.1, root, right))
     } else if index > left_len {
-        let (x, y) = split(right, index - left_len - 1);
-        (merge_with_root(left, node, x), y)
+        let tmp = split(right, index - left_len - 1);
+        (merge_with_root(left, root, tmp.0), tmp.1)
     } else {
-        (left, merge_with_root(None, node, right))
+        (left, merge_with_root(None, root, right))
     }
 }
 
 /// index番目のノードを取得する
-fn get<T>(node: Link<T>, index: usize) -> Link<T> {
-    let node_mut = unsafe { node?.as_mut() };
-    let left = node_mut.left;
-    let right = node_mut.right;
+fn get<T>(root: Link<T>, index: usize) -> Link<T> {
+    let raw_root = unsafe { root?.as_mut() };
+    let left = raw_root.left;
+    let right = raw_root.right;
     let left_len = len(left);
     if index < left_len {
         get(left, index)
     } else if index > left_len {
         get(right, index - left_len - 1)
     } else {
-        node
+        root
+    }
+}
+
+/// はじめてfがfalseとなるindexを返す
+/// すべての要素がtrueの場合はnを返す
+fn bisect<T>(root: Link<T>, mut f: impl FnMut(&T) -> bool) -> usize {
+    let node = if let Some(node) = root {
+        unsafe { node.as_ref() }
+    } else {
+        return 0;
+    };
+
+    let left = node.left;
+    let right = node.right;
+    let left_len = len(left);
+
+    if !f(&node.value) {
+        bisect(left, f)
+    } else {
+        bisect(right, f) + left_len + 1
     }
 }
 
@@ -358,13 +377,46 @@ impl<T> AvlTreeVec<T> {
         Self { root: right }
     }
 
-    // TODO: 仮
-    pub fn iter(&self) -> impl Iterator<Item = &T> + '_ {
-        let mut res = vec![];
-        traverse_inorder(self.root, |node| unsafe {
-            res.push(&node.as_ref().value);
-        });
-        res.into_iter()
+    pub fn bisect(&self, f: impl FnMut(&T) -> bool) -> usize {
+        bisect(self.root, f)
+    }
+
+    pub fn lower_bound(&self, value: &T) -> usize
+    where
+        T: Ord,
+    {
+        self.lower_bound_by(|e| e.cmp(value))
+    }
+
+    pub fn lower_bound_by(&self, mut f: impl FnMut(&T) -> Ordering) -> usize {
+        self.bisect(|e| f(e) == Ordering::Less)
+    }
+
+    pub fn lower_bound_by_key<K: Ord>(&self, k: &K, mut f: impl FnMut(&T) -> K) -> usize {
+        self.lower_bound_by(|e| f(e).cmp(k))
+    }
+
+    pub fn upper_bound(&self, value: &T) -> usize
+    where
+        T: Ord,
+    {
+        self.upper_bound_by(|e| e.cmp(value))
+    }
+
+    pub fn upper_bound_by(&self, mut f: impl FnMut(&T) -> Ordering) -> usize {
+        self.bisect(|e| f(e) != Ordering::Greater)
+    }
+
+    pub fn upper_bound_by_key<K: Ord>(&self, k: &K, mut f: impl FnMut(&T) -> K) -> usize {
+        self.upper_bound_by(|x| f(x).cmp(k))
+    }
+
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter::new(self.root)
+    }
+
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut::new(self.root)
     }
 }
 
@@ -390,6 +442,50 @@ impl<T> Index<usize> for AvlTreeVec<T> {
 impl<T> IndexMut<usize> for AvlTreeVec<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).unwrap()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a AvlTreeVec<T> {
+    type IntoIter = Iter<'a, T>;
+    type Item = &'a T;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T> IntoIterator for AvlTreeVec<T> {
+    type IntoIter = IntoIter<T>;
+    type Item = T;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        IntoIter::new(self.root.take())
+    }
+}
+
+impl<T: PartialEq> PartialEq for AvlTreeVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl<T: Eq> Eq for AvlTreeVec<T> {}
+
+impl<T: PartialOrd> PartialOrd for AvlTreeVec<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<T: Ord> Ord for AvlTreeVec<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<T: Hash> Hash for AvlTreeVec<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.iter().for_each(|item| item.hash(state));
     }
 }
 
@@ -430,6 +526,143 @@ impl<T, const N: usize> From<[T; N]> for AvlTreeVec<T> {
 impl<T: Debug> Debug for AvlTreeVec<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+struct IterBase<'a, T> {
+    stack: Vec<NodePtr<T>>,
+    stack_rev: Vec<NodePtr<T>>,
+    phantom: PhantomData<&'a ()>,
+}
+
+impl<'a, T> IterBase<'a, T> {
+    fn new(root: Link<T>) -> Self {
+        let mut iter = Self {
+            stack: vec![],
+            stack_rev: vec![],
+            phantom: PhantomData::default(),
+        };
+        iter.push_left(root);
+        iter.push_right(root);
+        iter
+    }
+
+    fn push_left(&mut self, mut node: Link<T>) {
+        while let Some(n) = node {
+            self.stack.push(n);
+            node = unsafe { n.as_ref() }.left;
+        }
+    }
+
+    fn push_right(&mut self, mut node: Link<T>) {
+        while let Some(n) = node {
+            self.stack_rev.push(n);
+            node = unsafe { n.as_ref() }.right;
+        }
+    }
+
+    #[inline]
+    fn next(&mut self) -> Option<NodePtr<T>> {
+        let node = self.stack.pop()?;
+        self.push_left(unsafe { node.as_ref() }.right);
+        Some(node)
+    }
+
+    #[inline]
+    fn next_back(&mut self) -> Option<NodePtr<T>> {
+        let node = self.stack_rev.pop()?;
+        self.push_right(unsafe { node.as_ref() }.left);
+        Some(node)
+    }
+}
+
+pub struct Iter<'a, T>(IterBase<'a, T>);
+
+impl<'a, T: 'a> Iter<'a, T> {
+    fn new(root: Link<T>) -> Self {
+        Self(IterBase::new(root))
+    }
+}
+
+impl<'a, T: 'a> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|node| &unsafe { node.as_ref() }.value)
+    }
+}
+
+impl<'a, T: 'a> DoubleEndedIterator for Iter<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0
+            .next_back()
+            .map(|node| &unsafe { node.as_ref() }.value)
+    }
+}
+
+pub struct IterMut<'a, T>(IterBase<'a, T>);
+
+impl<'a, T: 'a> IterMut<'a, T> {
+    fn new(root: Link<T>) -> Self {
+        Self(IterBase::new(root))
+    }
+}
+
+impl<'a, T: 'a> Iterator for IterMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .next()
+            .map(|mut node| &mut unsafe { node.as_mut() }.value)
+    }
+}
+
+impl<'a, T: 'a> DoubleEndedIterator for IterMut<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0
+            .next_back()
+            .map(|mut node| &mut unsafe { node.as_mut() }.value)
+    }
+}
+
+pub struct IntoIter<T> {
+    iter: std::vec::IntoIter<NodePtr<T>>,
+}
+
+impl<T> IntoIter<T> {
+    fn new(root: Link<T>) -> Self {
+        let mut stack = Vec::with_capacity(len(root));
+        traverse_inorder(root, |node| {
+            stack.push(node);
+        });
+        IntoIter {
+            iter: stack.into_iter(),
+        }
+    }
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.iter.next()?;
+        let boxed = unsafe { Box::from_raw(node.as_ptr()) };
+        Some(boxed.value)
+    }
+}
+
+impl<T> DoubleEndedIterator for IntoIter<T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let node = self.iter.next_back()?;
+        let boxed = unsafe { Box::from_raw(node.as_ptr()) };
+        Some(boxed.value)
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        for node in take(&mut self.iter) {
+            free(node)
+        }
     }
 }
 
@@ -524,5 +757,36 @@ mod tests {
         tree[3] = 2;
         tree[4] = 4;
         assert!(tree.iter().copied().eq([9, 9, 8, 2, 4]));
+    }
+
+    #[test]
+    fn test_lower_upper_bound() {
+        let v = AvlTreeVec::from([
+            2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40,
+        ]);
+        assert_eq!(v.lower_bound(&10), 4);
+        assert_eq!(v.lower_bound(&25), 12);
+        assert_eq!(v.lower_bound(&0), 0);
+        assert_eq!(v.lower_bound(&40), 19);
+        assert_eq!(v.lower_bound(&41), 20);
+        assert_eq!(v.lower_bound(&15), 7);
+        assert_eq!(v.lower_bound(&5), 2);
+
+        let v = AvlTreeVec::from([1, 3, 3, 5, 7, 9, 9, 9, 11, 13]);
+        assert_eq!(v.upper_bound(&0), 0);
+        assert_eq!(v.upper_bound(&3), 3);
+        assert_eq!(v.upper_bound(&9), 8);
+        assert_eq!(v.upper_bound(&10), 8);
+        assert_eq!(v.upper_bound(&13), 10);
+        assert_eq!(v.upper_bound(&14), 10);
+    }
+
+    #[test]
+    fn test_iter_mut() {
+        let mut v = AvlTreeVec::from([1, 2, 3, 4, 5]);
+        for e in v.iter_mut() {
+            *e *= 2;
+        }
+        assert!(v.iter().copied().eq([2, 4, 6, 8, 10]));
     }
 }
