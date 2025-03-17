@@ -1,15 +1,17 @@
 //! AVL木によるordered setの実装
+//! # NOTE
+//! - rangeの計算量が悪い
+//! - (全体のk番目は取得できるが)指定した範囲のk番目を取得できない(逆も然り)
 
 use std::{
     borrow::Borrow,
     cmp::Ordering,
-    fmt::Debug,
+    fmt::{Debug, Display},
     hash::Hash,
     mem::{swap, take},
+    ops::{Bound, RangeBounds, RangeFull},
     ptr::NonNull,
 };
-
-pub mod visualizer;
 
 #[derive(Clone)]
 struct Node<T> {
@@ -132,8 +134,53 @@ fn balance<T>(root: &mut Link<T>) {
     }
 }
 
+#[allow(unused)]
+fn traverse<T>(
+    node: Link<T>,
+    mut preorder_f: impl FnMut(NodePtr<T>),
+    mut inorder_f: impl FnMut(NodePtr<T>),
+    mut postorder_f: impl FnMut(NodePtr<T>),
+) {
+    fn traverse<T>(
+        node: Link<T>,
+        preorder_f: &mut impl FnMut(NodePtr<T>),
+        inorder_f: &mut impl FnMut(NodePtr<T>),
+        postorder_f: &mut impl FnMut(NodePtr<T>),
+    ) {
+        if let Some(node) = node {
+            let left = unsafe { node.as_ref() }.left;
+            let right = unsafe { node.as_ref() }.right;
+            preorder_f(node);
+            traverse(left, preorder_f, inorder_f, postorder_f);
+            inorder_f(node);
+            traverse(right, preorder_f, inorder_f, postorder_f);
+            postorder_f(node);
+        }
+    }
+
+    traverse(node, &mut preorder_f, &mut inorder_f, &mut postorder_f);
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_preorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, f, |_| {}, |_| {});
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_inorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, |_| {}, f, |_| {});
+}
+
+#[allow(unused)]
+#[inline]
+fn traverse_postorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
+    traverse(node, |_| {}, |_| {}, f);
+}
+
 /// rootに新しいノードを挿入する
-/// すでにnew_nodeと同じ値のノードが存在する場合は挿入せずnew_nodeのメモリを開放する
+/// すでにnew_nodeと同じ値のノードが存在する場合は挿入せずnew_nodeのメモリを解放する
 fn insert_node<T: Ord>(root: &mut Link<T>, new_node: NodePtr<T>) -> bool {
     fn insert<T: Ord>(root: &mut Link<T>, mut new_node: NodePtr<T>) -> bool {
         if let Some(node) = root.map(|mut node| unsafe { node.as_mut() }) {
@@ -166,51 +213,6 @@ fn insert_node<T: Ord>(root: &mut Link<T>, new_node: NodePtr<T>) -> bool {
     }
 
     insert(root, new_node)
-}
-
-#[allow(unused)]
-fn traverse<T>(
-    node: Link<T>,
-    mut preorder_f: impl FnMut(NodePtr<T>),
-    mut inorder_f: impl FnMut(NodePtr<T>),
-    mut post_order_f: impl FnMut(NodePtr<T>),
-) {
-    fn traverse<T>(
-        node: Link<T>,
-        preorder_f: &mut impl FnMut(NodePtr<T>),
-        inorder_f: &mut impl FnMut(NodePtr<T>),
-        post_order_f: &mut impl FnMut(NodePtr<T>),
-    ) {
-        if let Some(node) = node {
-            let left = unsafe { node.as_ref() }.left;
-            let right = unsafe { node.as_ref() }.right;
-            preorder_f(node);
-            traverse(left, preorder_f, inorder_f, post_order_f);
-            inorder_f(node);
-            traverse(right, preorder_f, inorder_f, post_order_f);
-            post_order_f(node);
-        }
-    }
-
-    traverse(node, &mut preorder_f, &mut inorder_f, &mut post_order_f);
-}
-
-#[allow(unused)]
-#[inline]
-fn traverse_preorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
-    traverse(node, f, |_| {}, |_| {});
-}
-
-#[allow(unused)]
-#[inline]
-fn traverse_inorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
-    traverse(node, |_| {}, f, |_| {});
-}
-
-#[allow(unused)]
-#[inline]
-fn traverse_postorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
-    traverse(node, |_| {}, |_| {}, f);
 }
 
 /// AVL木によるordered setの実装
@@ -336,7 +338,10 @@ impl<T> AvlTreeSet<T> {
     }
 
     /// 昇順n番目の要素
-    pub fn get_nth(&self, mut n: usize) -> Option<&T> {
+    pub fn get_nth(&self, mut n: usize) -> Option<&T>
+    where
+        T: Ord,
+    {
         let mut cur = &self.root;
         while let Some(node) = cur.map(|node| unsafe { node.as_ref() }) {
             let left_len = node_len(node.left);
@@ -353,7 +358,10 @@ impl<T> AvlTreeSet<T> {
     }
 
     /// 降順n番目の要素
-    pub fn get_nth_back(&self, mut n: usize) -> Option<&T> {
+    pub fn get_nth_back(&self, mut n: usize) -> Option<&T>
+    where
+        T: Ord,
+    {
         let mut cur = &self.root;
         while let Some(node) = cur.map(|node| unsafe { node.as_ref() }) {
             let right_len = node_len(node.right);
@@ -367,6 +375,35 @@ impl<T> AvlTreeSet<T> {
             }
         }
         None
+    }
+
+    // key以上最小の要素
+    pub fn lower_bound(&self, key: &T) -> Option<&T>
+    where
+        T: Ord,
+    {
+        let mut cur = &self.root;
+        let mut res = None;
+
+        while let Some(node) = cur.map(|node| unsafe { node.as_ref() }) {
+            match key.cmp(&node.key) {
+                Ordering::Equal | Ordering::Less => {
+                    res = cur.map(|node| &unsafe { node.as_ref() }.key);
+                    cur = &node.left;
+                }
+                _ => cur = &node.right,
+            }
+        }
+
+        res
+    }
+
+    pub fn range<'a, B>(&'a self, range: B) -> RangeIter<'a, T, B>
+    where
+        T: Ord,
+        B: RangeBounds<T>,
+    {
+        RangeIter::new(&self.root, range)
     }
 
     /// NOTE: 2つのAVL木の要素数をN, Mに対してO(min(N+M)log N)
@@ -408,8 +445,11 @@ impl<T> AvlTreeSet<T> {
         Self { root: right }
     }
 
-    pub fn iter(&self) -> Iter<'_, T> {
-        Iter::new(&self.root)
+    pub fn iter(&self) -> RangeIter<'_, T, RangeFull>
+    where
+        T: Ord,
+    {
+        RangeIter::new(&self.root, ..)
     }
 }
 
@@ -425,15 +465,15 @@ impl<T> Default for AvlTreeSet<T> {
     }
 }
 
-impl<T: PartialEq> PartialEq for AvlTreeSet<T> {
+impl<T: Ord + PartialEq> PartialEq for AvlTreeSet<T> {
     fn eq(&self, other: &Self) -> bool {
         self.iter().eq(other.iter())
     }
 }
 
-impl<T: Eq> Eq for AvlTreeSet<T> {}
+impl<T: Ord + Eq> Eq for AvlTreeSet<T> {}
 
-impl<T: PartialOrd> PartialOrd for AvlTreeSet<T> {
+impl<T: Ord + PartialOrd> PartialOrd for AvlTreeSet<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.iter().partial_cmp(other.iter())
     }
@@ -445,14 +485,14 @@ impl<T: Ord> Ord for AvlTreeSet<T> {
     }
 }
 
-impl<T: Hash> Hash for AvlTreeSet<T> {
+impl<T: Ord + Hash> Hash for AvlTreeSet<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.iter().for_each(|item| item.hash(state));
     }
 }
 
-impl<'a, T> IntoIterator for &'a AvlTreeSet<T> {
-    type IntoIter = Iter<'a, T>;
+impl<'a, T: Ord> IntoIterator for &'a AvlTreeSet<T> {
+    type IntoIter = RangeIter<'a, T, RangeFull>;
     type Item = &'a T;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -503,58 +543,9 @@ impl<T: Ord, const N: usize> From<[T; N]> for AvlTreeSet<T> {
     }
 }
 
-impl<T: Debug> Debug for AvlTreeSet<T> {
+impl<T: Ord + Debug> Debug for AvlTreeSet<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
-    }
-}
-
-pub struct Iter<'a, T> {
-    stack_left: Vec<&'a NodePtr<T>>,
-    stack_right: Vec<&'a NodePtr<T>>,
-}
-
-impl<'a, T> Iter<'a, T> {
-    fn new(root: &'a Link<T>) -> Self {
-        let mut iter = Self {
-            stack_left: vec![],
-            stack_right: vec![],
-        };
-        iter.push_left(root);
-        iter.push_right(root);
-        iter
-    }
-
-    fn push_left(&mut self, mut node: &'a Link<T>) {
-        while let Some(n) = node {
-            self.stack_left.push(n);
-            node = &unsafe { n.as_ref() }.left;
-        }
-    }
-
-    fn push_right(&mut self, mut node: &'a Link<T>) {
-        while let Some(n) = node {
-            self.stack_right.push(n);
-            node = &unsafe { n.as_ref() }.right;
-        }
-    }
-}
-
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = &'a T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let node = unsafe { self.stack_left.pop()?.as_ref() };
-        self.push_left(&node.right);
-        Some(&node.key)
-    }
-}
-
-impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let node = unsafe { self.stack_right.pop()?.as_ref() };
-        self.push_right(&node.left);
-        Some(&node.key)
     }
 }
 
@@ -601,12 +592,134 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
+// TODO: 全部走査しているので効率が悪い
+pub struct RangeIter<'a, T, B> {
+    stack_left: Vec<&'a NodePtr<T>>,
+    stack_right: Vec<&'a NodePtr<T>>,
+    range: B,
+}
+
+impl<'a, T: Ord, B: RangeBounds<T>> RangeIter<'a, T, B> {
+    fn new(root: &'a Link<T>, range: B) -> Self {
+        let mut res = Self {
+            stack_left: vec![],
+            stack_right: vec![],
+            range,
+        };
+        res.push_left(root);
+        res.push_right(root);
+        res
+    }
+
+    fn push_left(&mut self, mut node: &'a Link<T>) {
+        while let Some(node_ptr) = node {
+            self.stack_left.push(node_ptr);
+            node = &unsafe { node_ptr.as_ref() }.left;
+        }
+    }
+
+    fn push_right(&mut self, mut node: &'a Link<T>) {
+        while let Some(node_ptr) = node {
+            self.stack_right.push(node_ptr);
+            node = &unsafe { node_ptr.as_ref() }.right;
+        }
+    }
+
+    fn in_range(&self, key: &T) -> bool {
+        match self.range.start_bound() {
+            Bound::Included(start) if key < start => return false,
+            Bound::Excluded(start) if key <= start => return false,
+            _ => {}
+        }
+
+        match self.range.end_bound() {
+            Bound::Included(end) if key > end => return false,
+            Bound::Excluded(end) if key >= end => return false,
+            _ => {}
+        }
+
+        true
+    }
+}
+
+impl<'a, T: Ord, B: RangeBounds<T>> Iterator for RangeIter<'a, T, B> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let node = unsafe { self.stack_left.pop()?.as_ref() };
+            self.push_left(&node.right);
+            if self.in_range(&node.key) {
+                return Some(&node.key);
+            }
+        }
+    }
+}
+
+impl<'a, T: Ord, B: RangeBounds<T>> DoubleEndedIterator for RangeIter<'a, T, B> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        loop {
+            let node = unsafe { self.stack_right.pop()?.as_ref() };
+            self.push_right(&node.left);
+            if self.in_range(&node.key) {
+                return Some(&node.key);
+            }
+        }
+    }
+}
+
+/// デバッグ用
+#[allow(unused)]
+fn visualize<T: Display>(root: Link<T>) {
+    fn visualize<T: Display>(
+        node: Link<T>,
+        prefix: &str,
+        is_root: bool,
+        is_last: bool,
+        res: &mut String,
+    ) {
+        if let Some(node) = node.map(|node| unsafe { node.as_ref() }) {
+            if is_root {
+                *res += &format!("{}\n", node.key);
+            } else {
+                *res += &format!(
+                    "{}{}{}\n",
+                    prefix,
+                    if is_last { "└── " } else { "├── " },
+                    node.key
+                );
+            }
+
+            let new_prefix = if is_root {
+                String::new()
+            } else {
+                format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+            };
+
+            visualize(node.right, &new_prefix, false, node.left.is_none(), res);
+            visualize(node.left, &new_prefix, false, true, res);
+        }
+    }
+
+    let mut res = String::new();
+    visualize(root, "", true, true, &mut res);
+    println!("{}", res);
+}
+
+impl<T: Display> AvlTreeSet<T> {
+    #[allow(unused)]
+    pub fn visualize(&self) {
+        visualize(self.root);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::AvlTreeSet;
 
     #[test]
-    fn test_insert_and_contains() {
+    fn test_avl_tree_set_insert_and_contains() {
         let mut tree = AvlTreeSet::new();
         assert!(!tree.contains(&3));
         assert!(!tree.contains(&1));
@@ -626,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove() {
+    fn test_avl_tree_set_remove() {
         let mut tree = AvlTreeSet::from([52, 73, 63, 27, 44, 94, 31, 82, 70, 37]);
         assert!(tree
             .iter()
@@ -642,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_nth() {
+    fn test_avl_tree_set_get_nth() {
         let tree = AvlTreeSet::from([1, 3, 5, 7, 9]);
         assert_eq!(tree.get_nth(0), Some(&1));
         assert_eq!(tree.get_nth(1), Some(&3));
@@ -653,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_nth_back() {
+    fn test_avl_tree_set_get_nth_back() {
         let tree = AvlTreeSet::from([2, 4, 6, 8, 10]);
         assert_eq!(tree.get_nth_back(0), Some(&10));
         assert_eq!(tree.get_nth_back(1), Some(&8));
@@ -664,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append() {
+    fn test_avl_tree_set_append() {
         let mut tree1 = AvlTreeSet::from([1, 3, 5]);
         let mut tree2 = AvlTreeSet::from([2, 4, 6]);
         tree1.append(&mut tree2);
@@ -695,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_off() {
+    fn test_avl_tree_set_split_off() {
         let mut tree1 = AvlTreeSet::from([1, 2, 3, 4, 5, 6]);
         let tree2 = tree1.split_off(&4);
         assert!(tree1.iter().copied().eq([1, 2, 3]));
@@ -723,12 +836,79 @@ mod tests {
     }
 
     #[test]
+    fn test_avl_tree_set_range() {
+        let st = AvlTreeSet::from([1, 2, 3, 4, 5]);
+        assert!(st.range(2..5).copied().eq([2, 3, 4]));
+        assert!(st.range(2..5).rev().copied().eq([4, 3, 2]));
+
+        let st = AvlTreeSet::from([1, 3, 5]);
+        assert!(st.range(2..3).copied().eq([]));
+        assert!(st.range(2..3).rev().copied().eq([]));
+
+        let st = AvlTreeSet::from([1, 2, 3]);
+        assert!(st.range(1..4).copied().eq([1, 2, 3]));
+        assert!(st.range(1..4).rev().copied().eq([3, 2, 1]));
+
+        let st = AvlTreeSet::from([2, 4, 6, 8]);
+        assert!(st.range(3..7).copied().eq([4, 6]));
+        assert!(st.range(3..7).rev().copied().eq([6, 4]));
+
+        let st = AvlTreeSet::from([1, 3, 5, 7]);
+        assert!(st.range(2..6).copied().eq([3, 5]));
+        assert!(st.range(2..6).rev().copied().eq([5, 3]));
+
+        let st = AvlTreeSet::from([10, 20, 30]);
+        assert!(st.range(40..50).copied().eq([]));
+        assert!(st.range(40..50).rev().copied().eq([]));
+
+        let st = AvlTreeSet::from([5, 10, 15]);
+        assert!(st.range(10..11).copied().eq([10]));
+        assert!(st.range(10..11).rev().copied().eq([10]));
+
+        let st = AvlTreeSet::from([2, 4, 6, 8, 10]);
+        assert!(st.range(..).copied().eq([2, 4, 6, 8, 10]));
+        assert!(st.range(..=8).copied().eq([2, 4, 6, 8]));
+        assert!(st.range(4..).copied().eq([4, 6, 8, 10]));
+
+        let st = AvlTreeSet::from([2, 4, 6, 8, 10, 12, 14, 16]);
+        assert!(st.range(3..11).copied().eq([4, 6, 8, 10]));
+        assert!(st.range(3..11).rev().copied().eq([10, 8, 6, 4]));
+        assert!(st.range(4..7).copied().eq([4, 6]));
+    }
+
+    #[test]
+    fn test_avl_tree_set_range_nth() {
+        let st = AvlTreeSet::from([2, 4, 6, 8, 10, 12, 14, 16]);
+        assert_eq!(st.range(3..9).nth(0), Some(&4));
+        assert_eq!(st.range(3..9).nth(1), Some(&6));
+        assert_eq!(st.range(3..9).nth(2), Some(&8));
+        assert_eq!(st.range(3..9).nth(3), None);
+        assert_eq!(st.range(3..11).nth(3), Some(&10));
+
+        assert_eq!(st.range(6..16).nth_back(0), Some(&14));
+        assert_eq!(st.range(6..16).nth_back(1), Some(&12));
+        assert_eq!(st.range(6..16).nth_back(2), Some(&10));
+        assert_eq!(st.range(6..16).nth_back(3), Some(&8));
+        assert_eq!(st.range(6..16).nth_back(4), Some(&6));
+    }
+
+    #[test]
+    fn test_avl_tree_set_lower_bound() {
+        let st = AvlTreeSet::from([2, 4, 6, 8, 10, 12, 14, 16]);
+        assert_eq!(st.lower_bound(&4), Some(&4));
+        assert_eq!(st.lower_bound(&9), Some(&10));
+        assert_eq!(st.lower_bound(&1), Some(&2));
+        assert_eq!(st.lower_bound(&17), None);
+    }
+
+    #[allow(deprecated)]
+    #[test]
     #[cfg_attr(miri, ignore)]
-    fn test_random() {
-        use rand::{rng, Rng};
+    fn test_avl_tree_set_random() {
+        use rand::{thread_rng, Rng};
         use std::collections::BTreeSet;
 
-        let mut rng = rng();
+        let mut rng = thread_rng();
 
         for _ in 0..5 {
             let mut avl = AvlTreeSet::new();
@@ -738,22 +918,22 @@ mod tests {
                 // 1: contains
                 // 2: remove
                 // 3: nth
-                let t = rng.random_range(0..4);
+                let t = rng.gen_range(0..4);
                 match t {
                     0 => {
-                        let x = rng.random_range(-100..=100);
+                        let x = rng.gen_range(-100..=100);
                         assert_eq!(b.insert(x), avl.insert(x));
                     }
                     1 => {
-                        let x = rng.random_range(-100..=100);
+                        let x = rng.gen_range(-100..=100);
                         assert_eq!(b.contains(&x), avl.contains(&x));
                     }
                     2 => {
-                        let x = rng.random_range(-100..=100);
+                        let x = rng.gen_range(-100..=100);
                         assert_eq!(b.remove(&x), avl.remove(&x));
                     }
                     3 => {
-                        let k = rng.random_range(0..100);
+                        let k = rng.gen_range(0..100);
                         assert_eq!(b.iter().nth(k), avl.get_nth(k));
                         assert_eq!(b.iter().nth_back(k), avl.get_nth_back(k));
                     }

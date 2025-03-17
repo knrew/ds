@@ -3,12 +3,10 @@ use std::{
     fmt::Debug,
     hash::Hash,
     marker::PhantomData,
-    mem::take,
     ops::{Index, IndexMut},
     ptr::NonNull,
 };
 
-#[derive(Clone)]
 struct Node<T> {
     value: T,
     len: usize,
@@ -247,26 +245,26 @@ fn traverse<T>(
     node: Link<T>,
     mut preorder_f: impl FnMut(NodePtr<T>),
     mut inorder_f: impl FnMut(NodePtr<T>),
-    mut post_order_f: impl FnMut(NodePtr<T>),
+    mut postorder_f: impl FnMut(NodePtr<T>),
 ) {
-    fn traverse<T>(
+    fn dfs<T>(
         node: Link<T>,
         preorder_f: &mut impl FnMut(NodePtr<T>),
         inorder_f: &mut impl FnMut(NodePtr<T>),
-        post_order_f: &mut impl FnMut(NodePtr<T>),
+        postorder_f: &mut impl FnMut(NodePtr<T>),
     ) {
         if let Some(node) = node {
             let left = unsafe { node.as_ref() }.left;
             let right = unsafe { node.as_ref() }.right;
             preorder_f(node);
-            traverse(left, preorder_f, inorder_f, post_order_f);
+            dfs(left, preorder_f, inorder_f, postorder_f);
             inorder_f(node);
-            traverse(right, preorder_f, inorder_f, post_order_f);
-            post_order_f(node);
+            dfs(right, preorder_f, inorder_f, postorder_f);
+            postorder_f(node);
         }
     }
 
-    traverse(node, &mut preorder_f, &mut inorder_f, &mut post_order_f);
+    dfs(node, &mut preorder_f, &mut inorder_f, &mut postorder_f);
 }
 
 #[allow(unused)]
@@ -287,7 +285,6 @@ fn traverse_postorder<T>(node: Link<T>, f: impl FnMut(NodePtr<T>)) {
     traverse(node, |_| {}, |_| {}, f);
 }
 
-#[derive(Clone)]
 pub struct AvlTreeVec<T> {
     root: Link<T>,
 }
@@ -454,6 +451,15 @@ impl<'a, T> IntoIterator for &'a AvlTreeVec<T> {
     }
 }
 
+impl<'a, T> IntoIterator for &'a mut AvlTreeVec<T> {
+    type IntoIter = IterMut<'a, T>;
+    type Item = &'a mut T;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 impl<T> IntoIterator for AvlTreeVec<T> {
     type IntoIter = IntoIter<T>;
     type Item = T;
@@ -523,6 +529,12 @@ impl<T, const N: usize> From<[T; N]> for AvlTreeVec<T> {
     }
 }
 
+impl<T: Clone> Clone for AvlTreeVec<T> {
+    fn clone(&self) -> Self {
+        Self::from_iter(self.iter().cloned())
+    }
+}
+
 impl<T: Debug> Debug for AvlTreeVec<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
@@ -561,14 +573,12 @@ impl<'a, T> IterBase<'a, T> {
         }
     }
 
-    #[inline]
     fn next(&mut self) -> Option<NodePtr<T>> {
         let node = self.stack.pop()?;
         self.push_left(unsafe { node.as_ref() }.right);
         Some(node)
     }
 
-    #[inline]
     fn next_back(&mut self) -> Option<NodePtr<T>> {
         let node = self.stack_rev.pop()?;
         self.push_right(unsafe { node.as_ref() }.left);
@@ -625,14 +635,15 @@ impl<'a, T: 'a> DoubleEndedIterator for IterMut<'a, T> {
 }
 
 pub struct IntoIter<T> {
-    iter: std::vec::IntoIter<NodePtr<T>>,
+    iter: std::vec::IntoIter<T>,
 }
 
 impl<T> IntoIter<T> {
     fn new(root: Link<T>) -> Self {
         let mut stack = Vec::with_capacity(len(root));
         traverse_inorder(root, |node| {
-            stack.push(node);
+            let boxed = unsafe { Box::from_raw(node.as_ptr()) };
+            stack.push(boxed.value)
         });
         IntoIter {
             iter: stack.into_iter(),
@@ -644,31 +655,19 @@ impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let node = self.iter.next()?;
-        let boxed = unsafe { Box::from_raw(node.as_ptr()) };
-        Some(boxed.value)
+        self.iter.next()
     }
 }
 
 impl<T> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let node = self.iter.next_back()?;
-        let boxed = unsafe { Box::from_raw(node.as_ptr()) };
-        Some(boxed.value)
-    }
-}
-
-impl<T> Drop for IntoIter<T> {
-    fn drop(&mut self) {
-        for node in take(&mut self.iter) {
-            free(node)
-        }
+        self.iter.next_back()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::AvlTreeVec;
+    use super::AvlTreeVec;
 
     #[test]
     fn test_push_back() {
@@ -685,6 +684,7 @@ mod tests {
         assert_eq!(tree[4], 5);
         assert!(tree.iter().copied().eq([3, 1, 4, 1, 5]));
         assert_eq!(tree.len(), 5);
+        assert!(tree.into_iter().eq([3, 1, 4, 1, 5]));
     }
 
     #[test]
@@ -788,5 +788,9 @@ mod tests {
             *e *= 2;
         }
         assert!(v.iter().copied().eq([2, 4, 6, 8, 10]));
+        for e in &mut v {
+            *e += 1;
+        }
+        assert!(v.iter().copied().eq([3, 5, 7, 9, 11]));
     }
 }
